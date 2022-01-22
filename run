@@ -1,0 +1,233 @@
+try:
+    import zipfile
+    import datetime
+    import boto3
+    import re
+    import os
+    import json
+    import uuid
+except Exception as e:
+    pass
+
+
+global AWS_ACCESS_KEY
+global AWS_SECRET_KEY
+global AWS_REGION_NAME
+global s3bucketName
+
+AWS_ACCESS_KEY = "XXXXXXXXXX"
+AWS_SECRET_KEY = "XXXXX"
+AWS_REGION_NAME = "us-east-1"
+s3bucketName = "XXX"
+
+class Datetime(object):
+    @staticmethod
+    def get_year_month_day():
+        """
+        Return Year month and day
+        :return: str str str
+        """
+        dt = datetime.datetime.now()
+        year = dt.year
+        month = dt.month
+        day = dt.day
+        return year, month, day
+
+class AWSS3(object):
+
+    """Helper class to which add functionality on top of boto3"""
+
+    def __init__(self, bucket=s3bucketName, **kwargs):
+        self.BucketName = bucket
+        self.client = boto3.client(
+            "s3",
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY,
+            region_name=AWS_REGION_NAME,
+        )
+
+    def put_files_json(self, Response=None, Key=None):
+        """
+        Put the File on S3
+        :return: Bool
+        """
+        try:
+
+            DATA = bytes(json.dumps(Response).encode("UTF-8"))
+
+            response = self.client.put_object(
+                ACL="private", Body=DATA, Bucket=self.BucketName, Key=Key
+            )
+            return "ok"
+        except Exception as e:
+            print("Error : {} ".format(e))
+            return "error"
+
+    def put_files_raw(self, Response=None, Key=None):
+        """
+        Put the File on S3
+        :return: Bool
+        """
+        try:
+
+            response = self.client.put_object(
+                ACL="private", Body=Response, Bucket=self.BucketName, Key=Key
+            )
+            return "ok"
+        except Exception as e:
+            print("Error : {} ".format(e))
+            return "error"
+
+    def item_exists(self, Key):
+        """Given key check if the items exists on AWS S3"""
+        try:
+            response_new = self.client.get_object(Bucket=self.BucketName, Key=str(Key))
+            return True
+        except Exception as e:
+            return False
+
+    def get_item(self, Key):
+
+        """Gets the Bytes Data from AWS S3"""
+
+        try:
+            response_new = self.client.get_object(Bucket=self.BucketName, Key=str(Key))
+            return response_new["Body"].read()
+        except Exception as e:
+            return False
+
+    def find_one_update(self, data=None, key=None):
+
+        """
+        This checks if Key is on S3 if it is return the data from s3
+        else store on s3 and return it
+        """
+
+        flag = self.item_exists(Key=key)
+
+        if flag:
+            data = self.get_item(Key=key)
+            return data
+
+        else:
+            self.put_files(Key=key, Response=data)
+            return data
+
+    def delete_object(self, Key):
+
+        response = self.client.delete_object(Bucket=self.BucketName, Key=Key,)
+        return response
+
+    def get_all_keys(self, Prefix=""):
+
+        """
+        :param Prefix: Prefix string
+        :return: Keys List
+        """
+        try:
+            paginator = self.client.get_paginator("list_objects_v2")
+            pages = paginator.paginate(Bucket=self.BucketName, Prefix=Prefix)
+
+            tmp = []
+
+            for page in pages:
+                for obj in page["Contents"]:
+                    tmp.append(obj["Key"])
+
+            return tmp
+        except Exception as e:
+            return []
+
+    def print_tree(self):
+        keys = self.get_all_keys()
+        for key in keys:
+            print(key)
+        return None
+
+    def find_one_similar_key(self, searchTerm=""):
+        keys = self.get_all_keys()
+        return [key for key in keys if re.search(searchTerm, key)]
+
+    def __repr__(self):
+        return "AWS S3 Helper class "
+
+class Datalake(AWSS3):
+
+    def __init__(self, base_folder):
+        self.base_folder = base_folder
+        AWSS3.__init__(self)
+
+    def upload_data_lake(self, data, file_extension=''):
+        year, month, day = Datetime.get_year_month_day()
+
+        """base_folder/YYYY/MM/DD"""
+
+        file_name = "{}_{}_{}_{}.{}".format(
+            year, month, day, uuid.uuid4().__str__(), file_extension
+        )
+
+        path = "{}/year={}/month={}/day={}/{}".format(
+            self.base_folder,
+            year, month, day, file_name
+        )
+
+        self.put_files_raw(Response=data, Key=path)
+
+class ZipHelper(Datalake):
+
+    def __init__(self, zip_folder_name):
+        self.zip_folder_name = zip_folder_name
+        self.archive = None
+        Datalake.__init__(self, base_folder="")
+
+        self._read()
+
+    def _read(self):
+        """
+        Provate Method That reads Zip Files
+        :return: None
+        """
+        try:
+            self.archive = zipfile.ZipFile(self.zip_folder_name , 'r')
+        except Exception as e:
+            raise Exception ("Cannot read Zip Folder Error :{} ".format(e))
+
+    def get_all_files(self):
+        """
+        Return List of Files in Zip
+        :return: List
+        """
+        return self.archive.namelist()
+
+    def read_file_bytes(self, file_name):
+        try:
+            contents = self.archive.open(file_name)
+            return contents.read()
+        except Exception as e:
+            raise Exception("Cannot read File : {} ".format(file_name))
+
+    def read_all_files_bytes_in_zip(self):
+        for file in self.get_all_files():
+            content = self.read_file_bytes(file_name=file)
+
+            yield {
+                "file_name":file,
+                "content":content
+            }
+
+    def save_all_zip_files_in_current_directory(self, save_folder_path='temp'):
+        self.archive.extractall(save_folder_path)
+        return True
+
+    def move_all_zip_files_aws_s3_data_lake(self, base_folder='project'):
+        self.base_folder = base_folder
+        for file in self.get_all_files():
+            content = self.read_file_bytes(file_name=file)
+            file_extension = file.split(".")[1]
+            self.upload_data_lake(data=content, file_extension=file_extension)
+
+def main():
+    helper = ZipHelper(zip_folder_name='ZipTest.zip')
+    helper.move_all_zip_files_aws_s3_data_lake(base_folder='soumil')
+
+main()
